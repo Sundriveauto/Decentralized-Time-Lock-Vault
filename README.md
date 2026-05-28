@@ -210,6 +210,46 @@ Use `offset=0, limit=N` for the first page, then increment `offset` by `N` for s
 
 ---
 
+## Events
+
+All events are emitted via `env.events().publish(topics, data)`.
+
+| Event | Topics | Data |
+|---|---|---|
+| `deposit` | `("deposit", depositor, token)` | `(deposit_id, amount, unlock_time)` |
+| `withdraw` | `("withdraw", depositor, token)` | `(deposit_id, amount)` |
+| `emrg_wdraw` | `("emrg_wdraw", admin, depositor)` | `(deposit_id, token, amount)` |
+| `dep_cancel` | `("dep_cancel", depositor, token)` | `(amount, penalty)` |
+| `adm_xfr_init` | `("adm_xfr_init", current_admin)` | `pending_admin` |
+| `adm_xfr_done` | `("adm_xfr_done", new_admin)` | `()` |
+| `adm_renounce` | `("adm_renounce", former_admin)` | `()` |
+
+All `amount` and `penalty` values are `i128` token units. `deposit_id` is a `u32` per-depositor sequence number.
+
+---
+
+## Storage Layout
+
+All entries use **Persistent Storage** with TTL bump threshold ≈ 30 days (`BUMP_THRESHOLD = 518_400` ledgers) and target ≈ 5.2 years (`BUMP_TARGET = 33_000_000` ledgers), ensuring a max-duration deposit cannot expire before its unlock time.
+
+| Key | Type | Lifetime |
+|---|---|---|
+| `VaultKey::Admin` | `Address` | Set on `initialize`; removed on `renounce_admin` |
+| `VaultKey::PendingAdmin` | `Address` | Set by `transfer_admin`; cleared by `accept_admin` / `cancel_transfer_admin` |
+| `VaultKey::Initialized` | `bool` | Set once on `initialize`; never removed |
+| `VaultKey::FeeRecipient` | `Address` | Set on `initialize`; never removed |
+| `VaultKey::MaxDeposit` | `i128` | Set on `initialize` if overridden; absent means use compile-time default |
+| `VaultKey::MaxLockSecs` | `u64` | Set on `initialize` if overridden; absent means use compile-time default |
+| `VaultKey::DepositCounter(depositor)` | `u32` | Incremented on each `deposit`; never decremented |
+| `VaultKey::Deposit(depositor, id)` | `VaultEntry` | Created on `deposit`; removed on `withdraw` / `emergency_withdraw` / `cancel_deposit` |
+| `VaultKey::DepositorList` | `Vec<Address>` | Updated on `deposit` and `withdraw` |
+
+`VaultEntry` fields: `token: Address`, `amount: i128`, `unlock_time: u64`, `depositor: Address`, `penalty_bps: u32`.
+
+TTL is bumped on every **write**. Read-only query functions (`get_vault`, `time_remaining`, `get_time`) skip the TTL bump to avoid charging callers extra fees.
+
+---
+
 ## Error Codes
 
 | Code | Name | Meaning |
@@ -344,6 +384,87 @@ The script (`scripts/smoke_test_local.sh`):
 3. Deploys the contract and calls `initialize`, `deposit`, `get_vault`, `time_remaining`, and `withdraw`
 4. Asserts expected outputs at each step
 5. Stops the local node on exit
+
+---
+
+## Deployment Checklist
+
+Use this checklist when deploying to production.
+
+- [ ] Deploy and call `initialize` in the same transaction to prevent front-running
+- [ ] Verify `get_admin` returns the expected admin address
+- [ ] Run `get_constants` to confirm `MAX_DEPOSIT_AMOUNT` and `MAX_LOCK_DURATION_SECS` match your intended parameters
+- [ ] Verify `get_fee_recipient` returns the correct fee recipient address
+- [ ] Consider calling `renounce_admin` for fully trustless operation once setup is complete
+- [ ] Monitor storage TTL for long-duration vaults — entries are bumped on write but not on read
+- [ ] Confirm the optimized WASM size is within the Stellar network limit (`make check-wasm-size`)
+## Fee Estimation
+
+Soroban charges fees for persistent storage operations. Here is what each call costs at a high level:
+
+| Operation | Storage effect |
+|---|---|
+| `deposit` | Creates a new persistent entry + pays for initial TTL bump (~30-day threshold, ~5.2-year target) |
+| `withdraw` / `cancel_deposit` / `emergency_withdraw` | Removes the persistent entry (storage freed) |
+| `get_vault`, `time_remaining`, `get_time` | Read-only — **no TTL bump**, no extra storage fee |
+| `initialize` | Writes admin / fee-recipient entries once |
+
+Key points:
+- The depositor pays the storage-creation fee on `deposit`.
+- View functions intentionally skip TTL bumps to avoid charging callers for reads.
+- For very long locks (approaching 5 years) the TTL is set well beyond the unlock time, so no manual TTL extension is needed.
+
+For current fee rates see the [Stellar fee documentation](https://developers.stellar.org/docs/learn/fundamentals/fees-resource-limits-metering).
+
+---
+
+## Known Limitations
+
+| Limitation | Detail |
+|---|---|
+| One deposit per address | A depositor must `withdraw` or `cancel_deposit` before making a new deposit. |
+| No partial withdrawals | The full locked amount is returned in one call; partial releases are not supported. |
+| No early withdrawal without admin | Only `cancel_deposit` (with a penalty) or an admin `emergency_withdraw` can release funds before the unlock time. |
+| Single admin address | Admin is one key — no multisig or DAO governance. Use `renounce_admin` to go fully trustless. |
+| Storage TTL | Persistent entries are bumped to ~5.2 years on every write. Deposits longer than that would require a TTL extension call (current max lock is 5 years, so this is not an issue in practice). |
+
+---
+
+## Testing
+
+### Run all tests
+
+```bash
+make test
+```
+
+### Run a specific test
+
+```bash
+cargo test test_deposit_success --features testutils -- --nocapture
+```
+
+### Run all tests with output
+
+```bash
+cargo test --features testutils -- --nocapture
+```
+
+> Tests run natively (without `--target wasm32-unknown-unknown`) so that `soroban-sdk`'s `testutils` feature works correctly.
+
+### Test categories
+
+The suite (`contracts/time-lock-vault/src/test.rs`) contains 48+ tests covering:
+
+| Category | What is tested |
+|---|---|
+| Deposit | Valid deposits, duplicate deposits, amount/time boundary checks |
+| Withdraw | Successful withdrawal, early withdrawal rejection, missing deposit |
+| Cancel deposit | Penalty calculation, fee recipient transfer, post-unlock rejection |
+| Admin | `transfer_admin`, `accept_admin`, `cancel_transfer_admin`, `renounce_admin` |
+| Emergency withdraw | Admin-only access, funds always go to depositor |
+| Read-only queries | `get_vault`, `time_remaining`, `get_time`, `get_constants`, pagination |
+| Error codes | Every `VaultError` variant is exercised |
 
 ---
 
