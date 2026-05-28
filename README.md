@@ -139,6 +139,25 @@ Withdraws funds if `now >= unlock_time`. Fails with `FundsStillLocked` otherwise
 #### `emergency_withdraw(admin, depositor)`
 Admin-only. Returns funds to the depositor regardless of lock time. Funds always go to the depositor — never to the admin.
 
+#### `batch_emergency_withdraw(admin, depositors) → Vec<WithdrawResult>`
+Admin-only. Processes emergency withdrawals for multiple depositors in a single transaction — useful for contract migrations where many depositors need recovery at once.
+
+| Param | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Must be the current admin. Signs **once** for the entire batch. |
+| `depositors` | `Vec<Address>` | Addresses to process. Max `MAX_BATCH_SIZE` (25) entries. |
+
+**Best-effort**: depositors with no active deposit are skipped and recorded as `success: false` in the result — the call never aborts due to a missing deposit, so all valid entries are always processed.
+
+**Returns** `Vec<WithdrawResult>` — one entry per input address:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `depositor` | `Address` | The input address |
+| `success` | `bool` | `true` = funds transferred; `false` = no deposit found, skipped |
+
+**Instruction budget**: Soroban caps each transaction at ~100M instructions. Each iteration costs roughly 1–2M instructions (two storage removes, one token transfer, one event). The hard cap of 25 keeps the batch well within budget. For larger sets, page through depositors with `get_depositors(offset, limit)` and call this function multiple times.
+
 #### `transfer_admin(admin, new_admin)`
 Step 1 of a two-step admin transfer. Nominates `new_admin` as pending admin.
 
@@ -176,22 +195,6 @@ Returns the fee recipient address set at initialization.
 #### `get_constants() → (i128, u64)`
 Returns the effective `(MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS)` for this deployment — runtime-configured values if set at `initialize`, otherwise the compile-time defaults.
 
-#### `get_fee_recipient() → Option<Address>`
-Returns the fee recipient address set at initialization.
-
-#### `get_depositor_count() → u32`
-Returns the total number of addresses with an active deposit.
-
-#### `get_depositors(offset: u32, limit: u32) → Vec<Address>`
-Returns a paginated slice of active depositor addresses.
-
-| Param | Type | Description |
-|---|---|---|
-| `offset` | `u32` | Zero-based start index |
-| `limit` | `u32` | Maximum number of addresses to return |
-
-Use `offset=0, limit=N` for the first page, then increment `offset` by `N` for subsequent pages.
-
 #### `get_depositor_count() → u32`
 Returns the total number of addresses with an active deposit.
 
@@ -220,6 +223,9 @@ Use `offset=0, limit=N` for the first page, then increment `offset` by `N` for s
 | 7 | `Unauthorized` | Caller is not the admin |
 | 8 | `AmountTooLarge` | Amount exceeds 10^15 |
 | 9 | `InvalidPenaltyBps` | `penalty_bps` > 10000 |
+| 10 | `LockDurationTooShort` | Lock period is shorter than the minimum (60 s) |
+| 11 | `InvalidAdmin` | Nominated admin is the same as the current admin |
+| 12 | `BatchTooLarge` | `depositors.len()` exceeds `MAX_BATCH_SIZE` (25) |
 
 ---
 
