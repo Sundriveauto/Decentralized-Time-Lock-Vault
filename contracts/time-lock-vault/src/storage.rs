@@ -10,11 +10,16 @@ use crate::types::{VaultEntry, VaultKey};
 pub const BUMP_THRESHOLD: u32 = 518_400;
 
 /// Target TTL after a bump (≈ 5.2 years at 5s/ledger).
-/// Must exceed MAX_LOCK_DURATION_SECS in ledger units (157_788_000s / 5s = 31_557_600 ledgers)
-/// so a max-duration deposit cannot expire before its unlock time.
+/// Must exceed MAX_LOCK_DURATION_SECS in ledger units so a max-duration deposit
+/// cannot expire before its unlock time.
 pub const BUMP_TARGET: u32 = 33_000_000;
 
 // ----------------------------------------------------------------
+//  Deposit helpers
+// ----------------------------------------------------------------
+
+pub fn set_deposit(env: &Env, depositor: &Address, entry: &VaultEntry) {
+    let key = VaultKey::Deposit(depositor.clone());
 //  Deposit counter helpers
 // ----------------------------------------------------------------
 
@@ -59,6 +64,9 @@ pub fn set_deposit(env: &Env, depositor: &Address, deposit_id: u32, entry: &Vaul
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Load deposit and bump TTL (use for mutating paths that keep the entry).
+pub fn get_deposit(env: &Env, depositor: &Address) -> Option<VaultEntry> {
+    let key = VaultKey::Deposit(depositor.clone());
 /// Loads a deposit entry and bumps its TTL if found. Use for mutating call paths.
 pub fn get_deposit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<VaultEntry> {
     let key = VaultKey::Deposit(depositor.clone(), deposit_id);
@@ -71,6 +79,16 @@ pub fn get_deposit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<Va
     entry
 }
 
+/// Load deposit without bumping TTL (use when the entry will be deleted or for reads).
+pub fn get_deposit_readonly(env: &Env, depositor: &Address) -> Option<VaultEntry> {
+    let key = VaultKey::Deposit(depositor.clone());
+    env.storage().persistent().get(&key)
+}
+
+pub fn remove_deposit(env: &Env, depositor: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&VaultKey::Deposit(depositor.clone()));
 /// Loads a deposit entry without bumping TTL. Use for read-only queries to avoid extra fees.
 pub fn get_deposit_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> Option<VaultEntry> {
     let key = VaultKey::Deposit(depositor.clone(), deposit_id);
@@ -149,7 +167,9 @@ pub fn is_initialized(env: &Env) -> bool {
 /// Persists a runtime override for the maximum deposit amount and bumps TTL.
 pub fn set_max_deposit(env: &Env, v: i128) {
     env.storage().persistent().set(&VaultKey::MaxDeposit, &v);
-    env.storage().persistent().extend_ttl(&VaultKey::MaxDeposit, BUMP_THRESHOLD, BUMP_TARGET);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::MaxDeposit, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
 /// Returns the runtime-configured max deposit amount, or `None` to use the compile-time default.
@@ -173,6 +193,23 @@ pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
 // ----------------------------------------------------------------
 
 /// Persists the `fee_recipient` address and bumps TTL. Called once during `initialize`.
+pub fn set_fee_recipient(env: &Env, recipient: &Address) {
+    env.storage()
+        .persistent()
+        .set(&VaultKey::FeeRecipient, recipient);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::MaxLockSecs, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
+    env.storage().persistent().get(&VaultKey::MaxLockSecs)
+}
+
+// ----------------------------------------------------------------
+//  Fee recipient helpers
+// ----------------------------------------------------------------
+
 pub fn set_fee_recipient(env: &Env, recipient: &Address) {
     env.storage()
         .persistent()
@@ -207,14 +244,12 @@ fn save_depositor_list(env: &Env, list: &Vec<Address>) {
         .extend_ttl(&VaultKey::DepositorList, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
-/// Append `depositor` to the global depositor list.
 pub fn add_depositor(env: &Env, depositor: &Address) {
     let mut list = get_depositor_list(env);
     list.push_back(depositor.clone());
     save_depositor_list(env, &list);
 }
 
-/// Remove `depositor` from the global depositor list.
 pub fn remove_depositor(env: &Env, depositor: &Address) {
     let list = get_depositor_list(env);
     let mut new_list: Vec<Address> = Vec::new(env);
@@ -226,12 +261,10 @@ pub fn remove_depositor(env: &Env, depositor: &Address) {
     save_depositor_list(env, &new_list);
 }
 
-/// Returns the total number of active depositors.
 pub fn get_depositor_count(env: &Env) -> u32 {
     get_depositor_list(env).len()
 }
 
-/// Returns a page of depositors starting at `offset`, up to `limit` entries.
 pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> Vec<Address> {
     let list = get_depositor_list(env);
     let len = list.len();
