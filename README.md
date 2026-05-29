@@ -252,6 +252,9 @@ rustup target add wasm32-unknown-unknown
 
 # Install Soroban CLI
 cargo install --locked soroban-cli
+
+# Install cargo-watch (optional, for make watch)
+cargo install cargo-watch
 ```
 
 ### Build
