@@ -9,9 +9,10 @@ use soroban_sdk::{
 };
 
 use crate::{
+    constants::{MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS},
     contract::{TimeLockVault, TimeLockVaultClient},
     errors::VaultError,
-    types::{WithdrawResult, MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS},
+    types::WithdrawResult,
 };
 
 // ================================================================
@@ -164,7 +165,6 @@ fn test_deposit_success() {
     assert_eq!(entry.amount, 1_000);
     assert_eq!(entry.unlock_time, unlock_time);
     assert_eq!(entry.token, token);
-    assert_eq!(entry.depositor, alice);
     assert_eq!(entry.penalty_bps, 0);
 
     let events = env.events().all();
@@ -235,7 +235,6 @@ fn test_deposit_minimum_amount_succeeds() {
     assert_eq!(entry.amount, 1);
     assert_eq!(entry.unlock_time, unlock_time);
     assert_eq!(entry.token, token);
-    assert_eq!(entry.depositor, alice);
 
     // Alice started with 10_000; 1 unit transferred to contract
     assert_eq!(token_client.balance(&alice), 9_999);
@@ -581,7 +580,7 @@ fn test_emergency_withdraw_by_admin_before_unlock_succeeds() {
         (
             vault.address.clone(),
             (Symbol::new(&env, "emrg_wdraw"), admin.clone(), alice.clone()).into_val(&env),
-            (token.clone(), 2_000_i128).into_val(&env),
+            (token.clone(), 2_000_i128, unlock_time).into_val(&env),
         )
     );
 }
@@ -652,13 +651,20 @@ fn test_batch_emergency_withdraw_all_valid() {
     assert!(n >= 3);
     for i in (n - 3)..n {
         let e = all_events.get(i).unwrap();
+        let depositor = [alice.clone(), bob.clone(), carol.clone()][(i - (n - 3)) as usize].clone();
+        let amount = [1_000_i128, 2_000, 3_000][(i - (n - 3)) as usize];
         // topics tuple: (Symbol("emrg_wdraw"), admin, depositor)
         assert_eq!(
             e.1,
             (Symbol::new(&env, "emrg_wdraw"),
              admin.clone(),
-             [alice.clone(), bob.clone(), carol.clone()][(i - (n - 3)) as usize].clone())
+             depositor.clone())
                 .into_val(&env),
+        );
+        // data tuple: (token, amount, unlock_time)
+        assert_eq!(
+            e.2,
+            (token.clone(), amount, unlock_time).into_val(&env),
         );
     }
 }

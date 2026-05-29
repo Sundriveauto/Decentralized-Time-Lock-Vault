@@ -19,7 +19,7 @@ jobs:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -28,7 +28,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -53,6 +53,36 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo test --features testutils
+
+      - name: Run doc tests
+        run: cargo test --doc --features testutils
+
+  # ----------------------------------------------------------------
+  #  Unsafe Code Scanner (cargo-geiger)
+  # ----------------------------------------------------------------
+  geiger:
+    name: Unsafe Code Scanner (cargo-geiger)
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
@@ -70,8 +100,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Run tests
-        run: cargo test --features testutils
+      - name: Install cargo-geiger
+        run: cargo install cargo-geiger
+
+      - name: Scan for unsafe code
+        run: cargo geiger --all-features
 
   # ----------------------------------------------------------------
   #  Build WASM
@@ -81,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -89,7 +122,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -103,7 +136,7 @@ jobs:
 
       - name: Cache stellar-cli
         id: cache-stellar
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /usr/local/bin/stellar
           key: stellar-cli-${{ env.STELLAR_CLI_VERSION }}
@@ -136,7 +169,7 @@ jobs:
           fi
 
       - name: Upload optimized WASM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: time-lock-vault-wasm
           path: target/time_lock_vault.optimized.wasm
