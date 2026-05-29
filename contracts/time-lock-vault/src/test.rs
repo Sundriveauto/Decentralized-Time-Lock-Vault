@@ -118,7 +118,6 @@ fn test_deposit_success() {
     assert_eq!(entry.amount, 1_000);
     assert_eq!(entry.unlock_time, unlock_time);
     assert_eq!(entry.token, token);
-    assert_eq!(entry.depositor, alice);
     assert_eq!(entry.penalty_bps, 0);
 
     let events = env.events().all();
@@ -189,7 +188,6 @@ fn test_deposit_minimum_amount_succeeds() {
     assert_eq!(entry.amount, 1);
     assert_eq!(entry.unlock_time, unlock_time);
     assert_eq!(entry.token, token);
-    assert_eq!(entry.depositor, alice);
 
     // Alice started with 10_000; 1 unit transferred to contract
     assert_eq!(token_client.balance(&alice), 9_999);

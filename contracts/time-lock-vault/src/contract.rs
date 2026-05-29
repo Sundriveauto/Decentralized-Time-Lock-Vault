@@ -107,7 +107,6 @@ impl TimeLockVault {
             token: token.clone(),
             amount,
             unlock_time,
-            depositor: depositor.clone(),
             penalty_bps,
         };
         storage::set_deposit(&env, &depositor, &entry);
