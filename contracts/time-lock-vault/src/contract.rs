@@ -22,10 +22,11 @@ impl TimeLockVault {
     ///
     /// # Arguments
     /// * `admin`         — Address that gains emergency-withdrawal and admin privileges.
-    /// * `fee_recipient` — Address that receives penalty fees on early cancellation.
+    /// * `max_deposit`   — Optional runtime override for the maximum deposit amount.
+    /// * `max_lock_secs` — Optional runtime override for the maximum lock duration.
     ///
     /// # Errors
-    /// * `Unauthorized` — Contract has already been initialized.
+    /// * `AlreadyInitialized` — Contract has already been initialized.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -35,7 +36,7 @@ impl TimeLockVault {
         admin.require_auth();
 
         if storage::is_initialized(&env) {
-            return Err(VaultError::AlreadyInitialized);
+            return Err(VaultError::Unauthorized);
         }
         storage::set_admin(&env, &admin);
         storage::set_initialized(&env);
@@ -164,18 +165,17 @@ impl TimeLockVault {
     //  Core: Extend Lock
     // ----------------------------------------------------------------
 
-    /// Extend the unlock time of an active deposit. Requires the depositor's auth.
+    /// Extend the unlock time of an active deposit.
     /// `new_unlock_time` must be strictly greater than the current unlock time
     /// and must not exceed `now + max_lock_secs`.
     pub fn extend_lock(
         env: Env,
         depositor: Address,
-        deposit_id: u32,
         new_unlock_time: u64,
     ) -> Result<(), VaultError> {
         depositor.require_auth();
 
-        let mut entry = storage::get_deposit(&env, &depositor, deposit_id)
+        let mut entry = storage::get_deposit(&env, &depositor)
             .ok_or(VaultError::NoDepositFound)?;
 
         if new_unlock_time <= entry.unlock_time {
@@ -188,11 +188,15 @@ impl TimeLockVault {
             return Err(VaultError::LockDurationTooLong);
         }
 
-        let old_unlock_time = entry.unlock_time;
         entry.unlock_time = new_unlock_time;
-        storage::set_deposit(&env, &depositor, deposit_id, &entry);
+        // set_deposit increments the counter — but this is an update, not a new deposit.
+        // Write directly to avoid double-counting.
+        let key = crate::types::VaultKey::Deposit(depositor.clone());
+        env.storage().persistent().set(&key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, storage::BUMP_THRESHOLD, storage::BUMP_TARGET);
 
-        events::lock_extended(&env, &depositor, deposit_id, old_unlock_time, new_unlock_time);
         Ok(())
     }
 
@@ -397,8 +401,11 @@ impl TimeLockVault {
         storage::get_deposit_readonly(&env, &depositor)
     }
 
-    pub fn get_time(env: Env) -> u64 {
-        env.ledger().timestamp()
+    pub fn get_vault_with_time_remaining(env: Env, depositor: Address) -> Option<(VaultEntry, u64)> {
+        let entry = storage::get_deposit_readonly(&env, &depositor)?;
+        let now = env.ledger().timestamp();
+        let remaining = entry.unlock_time.saturating_sub(now);
+        Some((entry, remaining))
     }
 
     pub fn time_remaining(env: Env, depositor: Address) -> u64 {
@@ -409,6 +416,10 @@ impl TimeLockVault {
                 entry.unlock_time.saturating_sub(now)
             }
         }
+    }
+
+    pub fn has_deposit(env: Env, depositor: Address) -> bool {
+        storage::get_deposit_readonly(&env, &depositor).is_some()
     }
 
     pub fn get_time(env: Env) -> u64 {
@@ -423,6 +434,10 @@ impl TimeLockVault {
         storage::get_pending_admin(&env)
     }
 
+    pub fn is_admin(env: Env, address: Address) -> bool {
+        storage::get_admin(&env).map_or(false, |a| a == address)
+    }
+
     /// Returns the effective limits for this deployment.
     pub fn get_constants(env: Env) -> (i128, u64) {
         let max_deposit = storage::get_max_deposit(&env).unwrap_or(MAX_DEPOSIT_AMOUNT);
@@ -434,12 +449,18 @@ impl TimeLockVault {
         storage::get_fee_recipient(&env)
     }
 
+    /// Returns the total number of addresses with an active deposit (backed by DepositorList).
     pub fn get_depositor_count(env: Env) -> u32 {
         storage::get_depositor_count(&env)
     }
 
     pub fn get_depositors(env: Env, offset: u32, limit: u32) -> Vec<Address> {
         storage::get_depositors_page(&env, offset, limit)
+    }
+
+    /// Returns the total number of active deposits tracked by the Instance-storage counter.
+    pub fn get_deposit_count(env: Env) -> u64 {
+        storage::get_deposit_count(&env)
     }
 
     pub fn is_initialized(env: Env) -> bool {

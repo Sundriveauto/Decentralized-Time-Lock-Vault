@@ -22,6 +22,8 @@ pub enum VaultKey {
     MaxDeposit,
     /// Runtime-configurable max lock duration in seconds (overrides compile-time constant)
     MaxLockSecs,
+    /// Global count of active deposits (u64); stored in Instance storage
+    DepositCount,
 }
 
 // ----------------------------------------------------------------
