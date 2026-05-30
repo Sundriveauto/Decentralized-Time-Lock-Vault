@@ -1384,3 +1384,67 @@ fn test_auth_renounce_admin_requires_admin() {
     vault.renounce_admin(&admin);
     assert_eq!(env.auths()[0].0, admin);
 }
+
+// ================================================================
+//  Boundary & lifecycle tests (#97 – #100)
+// ================================================================
+
+// #97 — deposit with unlock_time == now + MAX_LOCK_DURATION_SECS must succeed
+#[test]
+fn test_deposit_exact_max_lock_duration_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + MAX_LOCK_DURATION_SECS;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    assert!(vault.get_vault(&alice, &id).is_some());
+}
+
+// #98 — withdraw at unlock_time - 1 must fail with FundsStillLocked
+#[test]
+fn test_withdraw_fails_at_unlock_time_minus_one() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    // Advance to exactly one second before unlock
+    advance_time(&env, 3599);
+    assert_eq!(
+        vault.try_withdraw(&alice, &id),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+}
+
+// #99 — withdraw at exactly unlock_time must succeed (now == unlock_time)
+#[test]
+fn test_withdraw_succeeds_at_exact_unlock_time() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    advance_time(&env, 3600);
+    vault.withdraw(&alice, &id);
+    assert!(vault.get_vault(&alice, &id).is_none());
+}
+
+// #100 — full lifecycle: deposit → advance time → withdraw → re-deposit
+#[test]
+fn test_full_lifecycle_deposit_withdraw_redeposit() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    // 1. deposit
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    assert!(vault.get_vault(&alice, &id).is_some());
+
+    // 2. advance ledger past unlock_time
+    advance_time(&env, 3601);
+
+    // 3. withdraw
+    vault.withdraw(&alice, &id);
+    assert!(vault.get_vault(&alice, &id).is_none());
+
+    // 4. re-deposit with same depositor — must succeed (re-deposit guard cleared)
+    let new_unlock = env.ledger().timestamp() + 3600;
+    let new_id = vault.deposit(&alice, &token, &500, &new_unlock, &0);
+    assert!(vault.get_vault(&alice, &new_id).is_some());
+    assert_eq!(vault.get_vault(&alice, &new_id).unwrap().amount, 500);
+}
