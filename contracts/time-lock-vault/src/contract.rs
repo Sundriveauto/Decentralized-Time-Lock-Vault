@@ -32,6 +32,7 @@ impl TimeLockVault {
     pub fn initialize(
         env: Env,
         admin: Address,
+        fee_recipient: Address,
         max_deposit: Option<i128>,
         max_lock_secs: Option<u64>,
     ) -> Result<(), VaultError> {
@@ -73,7 +74,7 @@ impl TimeLockVault {
         unlock_time: u64,
     ) -> Result<u32, VaultError> {
         penalty_bps: u32,
-    ) -> Result<(), VaultError> {
+    ) -> Result<u32, VaultError> {
         depositor.require_auth();
 
         if amount <= 0 {
@@ -127,6 +128,7 @@ impl TimeLockVault {
 
         // --- Maintain global depositor list ---
         storage::add_depositor(&env, &depositor);
+        events::deposit(&env, &depositor, deposit_id, &token, amount, unlock_time);
 
         // --- Emit event ---
         events::deposit(&env, &depositor, &token, amount, unlock_time);
@@ -138,14 +140,11 @@ impl TimeLockVault {
     //  Core: Cancel Deposit (early exit with penalty)
     // ----------------------------------------------------------------
 
-    /// Cancel an active deposit before the unlock time, paying a penalty.
-    /// Penalty goes to `fee_recipient`; remainder returned to depositor.
-    /// Fails with `FundsStillLocked` if already past unlock time — use `withdraw`.
-    pub fn cancel_deposit(env: Env, depositor: Address) -> Result<(), VaultError> {
+    pub fn cancel_deposit(env: Env, depositor: Address, deposit_id: u32) -> Result<(), VaultError> {
         depositor.require_auth();
 
-        let entry = storage::get_deposit(&env, &depositor)
-            .ok_or(VaultError::NoDepositFound)?;
+        let entry =
+            storage::get_deposit(&env, &depositor, deposit_id).ok_or(VaultError::NoDepositFound)?;
 
         let now = env.ledger().timestamp();
         if now >= entry.unlock_time {

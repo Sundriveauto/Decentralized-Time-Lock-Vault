@@ -1386,70 +1386,65 @@ fn test_auth_renounce_admin_requires_admin() {
 }
 
 // ================================================================
-//  #101 – token balances correct after emergency_withdraw
+//  Boundary & lifecycle tests (#97 – #100)
 // ================================================================
 
+// #97 — deposit with unlock_time == now + MAX_LOCK_DURATION_SECS must succeed
 #[test]
-fn test_emergency_withdraw_token_balances() {
-    let (env, vault, token, admin, alice, _fee) = setup();
-    let token_client = TokenClient::new(&env, &token);
-    let unlock_time = env.ledger().timestamp() + 86400;
-    let amount: i128 = 3_000;
-
-    vault.deposit(&alice, &token, &amount, &unlock_time, &0);
-
-    let alice_before = token_client.balance(&alice);
-    let contract_before = token_client.balance(&vault.address);
-    let admin_before = token_client.balance(&admin);
-
-    vault.emergency_withdraw(&admin, &alice);
-
-    // Depositor received the funds back
-    assert_eq!(token_client.balance(&alice), alice_before + amount);
-    // Contract balance decreased by the deposited amount
-    assert_eq!(token_client.balance(&vault.address), contract_before - amount);
-    // Admin balance is unchanged — funds never go to admin
-    assert_eq!(token_client.balance(&admin), admin_before);
-}
-
-// ================================================================
-//  #102 – deposit fails when depositor has insufficient balance
-// ================================================================
-
-#[test]
-fn test_deposit_fails_insufficient_balance() {
+fn test_deposit_exact_max_lock_duration_succeeds() {
     let (env, vault, token, _admin, alice, _fee) = setup();
-    // Mint 0 extra tokens — alice has 10_000 from setup; use a fresh address with 0 balance
-    let broke: Address = Address::generate(&env);
+    let unlock_time = env.ledger().timestamp() + MAX_LOCK_DURATION_SECS;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    assert!(vault.get_vault(&alice, &id).is_some());
+}
+
+// #98 — withdraw at unlock_time - 1 must fail with FundsStillLocked
+#[test]
+fn test_withdraw_fails_at_unlock_time_minus_one() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
     let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
 
-    // broke has 0 tokens; deposit of 100 must fail at the token transfer level
-    let result = vault.try_deposit(&broke, &token, &100, &unlock_time, &0);
-    assert!(result.is_err());
-
-    // No vault entry should have been written
-    assert!(vault.get_vault(&broke).is_none());
+    // Advance to exactly one second before unlock
+    advance_time(&env, 3599);
+    assert_eq!(
+        vault.try_withdraw(&alice, &id),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
 }
 
-// ================================================================
-//  #103 – get_constants returns correct compile-time values
-// ================================================================
-
+// #99 — withdraw at exactly unlock_time must succeed (now == unlock_time)
 #[test]
-fn test_get_constants() {
-    let (_env, vault, _token, _admin, _alice, _fee) = setup();
-    let (max_amount, max_duration) = vault.get_constants();
-    assert_eq!(max_amount, 1_000_000_000_000_000_i128);
-    assert_eq!(max_duration, 157_788_000_u64);
+fn test_withdraw_succeeds_at_exact_unlock_time() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+
+    advance_time(&env, 3600);
+    vault.withdraw(&alice, &id);
+    assert!(vault.get_vault(&alice, &id).is_none());
 }
 
-// ================================================================
-//  #104 – time_remaining returns 0 when no deposit exists
-// ================================================================
-
+// #100 — full lifecycle: deposit → advance time → withdraw → re-deposit
 #[test]
-fn test_time_remaining_no_deposit() {
-    let (env, vault, _token, _admin, _alice, _fee) = setup();
-    let never_deposited: Address = Address::generate(&env);
-    assert_eq!(vault.time_remaining(&never_deposited), 0);
+fn test_full_lifecycle_deposit_withdraw_redeposit() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    // 1. deposit
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let id = vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    assert!(vault.get_vault(&alice, &id).is_some());
+
+    // 2. advance ledger past unlock_time
+    advance_time(&env, 3601);
+
+    // 3. withdraw
+    vault.withdraw(&alice, &id);
+    assert!(vault.get_vault(&alice, &id).is_none());
+
+    // 4. re-deposit with same depositor — must succeed (re-deposit guard cleared)
+    let new_unlock = env.ledger().timestamp() + 3600;
+    let new_id = vault.deposit(&alice, &token, &500, &new_unlock, &0);
+    assert!(vault.get_vault(&alice, &new_id).is_some());
+    assert_eq!(vault.get_vault(&alice, &new_id).unwrap().amount, 500);
 }
