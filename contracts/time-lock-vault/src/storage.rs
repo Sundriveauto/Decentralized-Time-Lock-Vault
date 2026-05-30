@@ -80,6 +80,10 @@ pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().persistent().get(&VaultKey::Admin)
 }
 
+pub fn remove_admin(env: &Env) {
+    env.storage().persistent().remove(&VaultKey::Admin);
+}
+
 pub fn set_pending_admin(env: &Env, pending: &Address) {
     env.storage()
         .persistent()
@@ -182,6 +186,11 @@ fn save_depositor_list(env: &Env, list: &Vec<Address>) {
 
 pub fn add_depositor(env: &Env, depositor: &Address) {
     let mut list = get_depositor_list(env);
+    for addr in list.iter() {
+        if &addr == depositor {
+            return;
+        }
+    }
     list.push_back(depositor.clone());
     save_depositor_list(env, &list);
 }
@@ -210,26 +219,4 @@ pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> Vec<Address> {
         page.push_back(list.get(i).unwrap());
     }
     page
-}
-
-// ----------------------------------------------------------------
-//  Initialized flag
-// ----------------------------------------------------------------
-
-/// Mark the contract as initialized (called once during initialize()).
-pub fn set_initialized(env: &Env) {
-    env.storage()
-        .persistent()
-        .set(&VaultKey::Initialized, &true);
-    env.storage()
-        .persistent()
-        .extend_ttl(&VaultKey::Initialized, BUMP_THRESHOLD, BUMP_TARGET);
-}
-
-/// Returns true if initialize() has ever been called.
-pub fn is_initialized(env: &Env) -> bool {
-    env.storage()
-        .persistent()
-        .get::<VaultKey, bool>(&VaultKey::Initialized)
-        .unwrap_or(false)
 }

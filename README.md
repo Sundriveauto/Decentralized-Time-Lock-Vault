@@ -172,17 +172,11 @@ Permanently removes admin privileges. After this call, `emergency_withdraw` and 
 
 ### Read-only Queries
 
-#### `get_vault(depositor) → Option<VaultEntry>`
+#### `get_vault(depositor, deposit_id) → Option<VaultEntry>`
 Returns the current vault entry. Does **not** bump storage TTL (no extra fees).
 
-#### `get_vault_with_time_remaining(depositor) → Option<(VaultEntry, u64)>`
-Returns `Some((entry, seconds_remaining))` if a deposit exists, or `None`. Combines `get_vault` and `time_remaining` into a single RPC call.
-
-#### `time_remaining(depositor) → u64`
+#### `time_remaining(depositor, deposit_id) → u64`
 Returns seconds until unlock. Returns `0` if unlocked or no deposit exists. Does **not** bump TTL.
-
-#### `has_deposit(depositor) → bool`
-Returns `true` if `depositor` has an active deposit. Cheaper than `get_vault` — no `VaultEntry` deserialization.
 
 #### `get_time() → u64`
 Returns the current ledger timestamp.
