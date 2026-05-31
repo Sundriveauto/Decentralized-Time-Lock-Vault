@@ -40,6 +40,21 @@ pub fn admin_renounced(env: &Env, former_admin: &Address) {
     env.events().publish(topics, ());
 }
 
+pub fn paused(env: &Env, admin: &Address) {
+    let topics = (Symbol::new(env, "paused"), admin.clone());
+    env.events().publish(topics, ());
+}
+
+pub fn unpaused(env: &Env, admin: &Address) {
+    let topics = (Symbol::new(env, "unpaused"), admin.clone());
+    env.events().publish(topics, ());
+}
+
+pub fn withdraw_to(env: &Env, depositor: &Address, recipient: &Address, token: &Address, amount: i128) {
+    let topics = (Symbol::new(env, "wdraw_to"), depositor.clone(), recipient.clone());
+    env.events().publish(topics, (token.clone(), amount));
+}
+
 pub fn deposit_cancelled(
     env: &Env,
     depositor: &Address,
