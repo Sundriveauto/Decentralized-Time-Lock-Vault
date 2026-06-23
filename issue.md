@@ -2,91 +2,102 @@
 
 ---
 
-## [BUG] `deposit` allows front-running between `has_deposit` check and `set_deposit` write
+## [BUG] `deposit_by_ledger` bypasses pause state and lock-duration validation
 
-**Labels:** `bug` `security` `advanced`
+**Labels:** `bug` `security` `contract`
 **Priority:** 🔴 Critical
 **Difficulty:** Advanced
-**Tags:** `contract` `storage` `security` `atomicity`
+**Tags:** `contract` `pause` `validation` `ledger`
 
 ---
 
 ### Description
 
-In `contract.rs`, the `deposit` function performs a read-check-write sequence that is not atomic at the application level:
+`deposit_by_ledger` in `contracts/time-lock-vault/src/contract.rs` accepts ledger-based deposits without enforcing the same pause and lock-duration rules as timestamp-based deposit methods.
 
-```rust
-if storage::has_deposit(&env, &depositor) {
-    return Err(VaultError::DepositAlreadyExists);
-}
-// ← window here
-token_client.transfer(...);
-storage::set_deposit(&env, &depositor, &entry);
-```
-
-While Soroban transactions are atomic within a single ledger, a carefully timed concurrent transaction from the same address — or a contract that calls `deposit` twice in a single invoke chain — could bypass the `has_deposit` guard if Soroban's execution model does not enforce per-address mutex semantics across re-entrant invocations.
-
-Additionally, `has_deposit` does not bump the TTL of the entry it reads. If the deposit entry is within 30 days of expiry (below `BUMP_THRESHOLD`), the entry could expire between `has_deposit` returning `false` and `set_deposit` executing, silently allowing a re-deposit on what was technically a live-but-expired entry.
+This creates two concrete issues:
+- a paused contract can still accept ledger-based deposits,
+- ledger-based deposits can be created with durations shorter than `MIN_LOCK_DURATION_SECS` or longer than the configured maximum.
 
 ---
 
 ### Reproduction Steps
 
-1. Deploy the contract to a local Soroban testnet
-2. Create a deposit for `alice` with a 1-year lock
-3. Wait until the entry TTL is within the `BUMP_THRESHOLD` window (≈518,400 ledgers from expiry)
-4. Call `deposit` again for `alice` without withdrawing first
-5. Observe: `has_deposit` may return `false` on an expired-but-not-removed entry, allowing a second deposit to overwrite the first without error
+1. Deploy the contract and call `initialize(admin, fee_recipient, None, None)`.
+2. Call `pause(admin)`.
+3. Call `deposit_by_ledger(depositor, token, amount, current_ledger + 10, 0)`.
+4. Observe the call succeeds even though the contract is paused.
+5. Call `deposit_by_ledger(depositor, token, amount, current_ledger + 1, 0)`.
+6. Observe the call succeeds despite an effectively too-short lock period.
 
 ---
 
 ### Expected Behavior
 
-`deposit` must return `VaultError::DepositAlreadyExists` for any address that has an active or recently-expired-but-not-withdrawn entry. The TTL check and duplicate guard must be consistent.
+- `deposit_by_ledger` returns `VaultError::ContractPaused` when the contract is paused.
+- `deposit_by_ledger` rejects lock durations shorter than `MIN_LOCK_DURATION_SECS`.
+- `deposit_by_ledger` rejects lock durations longer than the configured runtime `max_lock_secs` or `MAX_LOCK_DURATION_SECS`.
+- Ledger-based deposits follow the same contract invariants as timestamp-based deposits.
 
 ---
 
 ### Actual Behavior
 
-`has_deposit` does not bump TTL. An entry past `BUMP_THRESHOLD` but not yet removed from storage could return `false` from `has()` while the underlying storage slot is in an indeterminate state, allowing `set_deposit` to silently overwrite a still-valid entry whose TTL was not refreshed.
+- `deposit_by_ledger` does not check for pause state.
+- `deposit_by_ledger` does not validate lock duration at all.
+- The ledger deposit path can therefore bypass emergency pause and create invalid locks.
 
 ---
 
 ### Technical Notes
 
-- Soroban's `persistent().has()` returns `false` for entries whose TTL has expired at the ledger level, even if the data has not been explicitly removed
-- `BUMP_THRESHOLD = 518_400` ledgers ≈ 30 days at 5s/ledger
-- `set_deposit` correctly bumps TTL, but `has_deposit` does not
-- The fix is to either: (a) bump TTL inside `has_deposit`, or (b) use `get_deposit` (which already bumps TTL) and check `is_some()` instead of calling `has_deposit` separately
+- `deposit()` and `deposit_for()` both call `storage::is_paused(&env)`.
+- `deposit_by_ledger()` only checks `amount` and `penalty_bps` before transferring tokens.
+- `deposit_by_ledger()` lacks any validation of `unlock_ledger` relative to `env.ledger().sequence()` other than `unlock_ledger > current_ledger`.
+- The current public API also does not properly expose ledger deposits through `get_vault`, `time_remaining`, or `get_deposit_ids`.
 
 ---
 
 ### Acceptance Criteria
 
-- [ ] `has_deposit` bumps TTL when returning `true`, or is replaced by a `get_deposit`-based check in the `deposit` function
-- [ ] No double-deposit is possible for an address with a live vault, regardless of entry TTL state
-- [ ] A regression test is added that deposits, advances ledger to near-TTL-expiry, and attempts a second deposit — expecting `DepositAlreadyExists`
-- [ ] All 35 existing tests continue to pass
-- [ ] Inline comment explains the TTL-consistency requirement
+- [ ] `deposit_by_ledger` checks `storage::is_paused(&env)` and returns `VaultError::ContractPaused` when paused.
+- [ ] `deposit_by_ledger` validates `unlock_ledger` against minimum and maximum lock durations.
+- [ ] Add unit tests for paused-state rejection and ledger lock-duration boundary cases.
+- [ ] Update documentation to state pause semantics for ledger-based deposits.
 
 ---
 
 ### Suggested Implementation
 
-```rust
-// In contract.rs deposit():
-// Replace:
-if storage::has_deposit(&env, &depositor) {
-    return Err(VaultError::DepositAlreadyExists);
-}
+1. Add pause validation at the start of `deposit_by_ledger()`:
 
-// With:
-if storage::get_deposit(&env, &depositor).is_some() {
-    return Err(VaultError::DepositAlreadyExists);
+```rust
+if storage::is_paused(&env) {
+    return Err(VaultError::ContractPaused);
 }
 ```
 
-This ensures TTL is bumped during the check, making the guard consistent with the subsequent write.
+2. Compute ledger-based lock duration:
+
+```rust
+let current_ledger = env.ledger().sequence();
+let lock_ledgers = unlock_ledger.saturating_sub(current_ledger);
+let lock_seconds = lock_ledgers.saturating_mul(LEDGER_SECONDS);
+```
+
+3. Reuse the existing time-based deposit bounds checks:
+
+```rust
+let max_lock = storage::get_max_lock_secs(&env).unwrap_or(MAX_LOCK_DURATION_SECS);
+if lock_seconds > max_lock {
+    return Err(VaultError::LockDurationTooLong);
+}
+if lock_seconds < MIN_LOCK_DURATION_SECS {
+    return Err(VaultError::LockDurationTooShort);
+}
+```
+
+4. Add regression tests for paused contracts and invalid ledger lock durations.
 
 ---
 
