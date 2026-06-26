@@ -598,9 +598,10 @@ fn test_cancel_deposit_after_unlock_fails() {
     let unlock_time = env.ledger().timestamp() + 3600;
     vault.deposit(&alice, &token, &1_000, &unlock_time, &500);
     advance_time(&env, 3601);
+    // Vault is past unlock_time — caller should use `withdraw` instead.
     assert_eq!(
         vault.try_cancel_deposit(&alice, &0),
-        Err(Ok(VaultError::FundsStillLocked))
+        Err(Ok(VaultError::FundsAlreadyUnlocked))
     );
 }
 

@@ -6,7 +6,6 @@
 use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
 
 use crate::{
-    constants::{MAX_BATCH_SIZE, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS, MIN_LOCK_DURATION_SECS},
     errors::VaultError,
     events, storage,
     types::{LedgerVaultEntry, VaultEntry},
@@ -118,7 +117,7 @@ impl TimeLockVault {
 
         storage::set_deposit(&env, &depositor, deposit_id, &entry);
         storage::add_depositor(&env, &depositor);
-        events::deposit(&env, &depositor, &token, amount, unlock_time);
+        events::deposit(&env, &depositor, &token, deposit_id, amount, unlock_time);
 
         Ok(deposit_id)
     }
@@ -180,13 +179,13 @@ impl TimeLockVault {
 
         storage::set_deposit(&env, &depositor, deposit_id, &entry);
         storage::add_depositor(&env, &depositor);
-        events::deposit(&env, &depositor, &token, amount, unlock_time);
+        events::deposit(&env, &depositor, &token, deposit_id, amount, unlock_time);
 
         Ok(deposit_id)
     }
 
     // ----------------------------------------------------------------
-    //  Core: Deposit by Ledger Sequence (Issue #88)
+    //  Core: Deposit by Ledger Sequence
     // ----------------------------------------------------------------
 
     pub fn deposit_by_ledger(
@@ -232,7 +231,7 @@ impl TimeLockVault {
 
         storage::set_deposit_by_ledger(&env, &depositor, deposit_id, &entry);
         storage::add_depositor(&env, &depositor);
-        events::deposit(&env, &depositor, &token, amount, unlock_ledger as u64);
+        events::deposit(&env, &depositor, &token, deposit_id, amount, unlock_ledger as u64);
 
         Ok(deposit_id)
     }
@@ -248,8 +247,10 @@ impl TimeLockVault {
             storage::get_deposit(&env, &depositor, deposit_id).ok_or(VaultError::NoDepositFound)?;
 
         let now = env.ledger().timestamp();
+        // cancel_deposit is only valid *before* the unlock time.
+        // If the vault has already unlocked, the depositor should use `withdraw` instead.
         if now >= entry.unlock_time {
-            return Err(VaultError::FundsStillLocked);
+            return Err(VaultError::FundsAlreadyUnlocked);
         }
 
         storage::remove_deposit(&env, &depositor, deposit_id);
@@ -298,7 +299,7 @@ impl TimeLockVault {
             let token_client = token::Client::new(&env, &entry.token);
             token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
-            events::withdraw(&env, &depositor, &entry.token, entry.amount);
+            events::withdraw(&env, &depositor, &entry.token, deposit_id, entry.amount);
             return Ok(());
         }
 
@@ -317,7 +318,7 @@ impl TimeLockVault {
             let token_client = token::Client::new(&env, &entry.token);
             token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
-            events::withdraw(&env, &depositor, &entry.token, entry.amount);
+            events::withdraw(&env, &depositor, &entry.token, deposit_id, entry.amount);
             return Ok(());
         }
 
@@ -376,8 +377,69 @@ impl TimeLockVault {
         let token_client = token::Client::new(&env, &entry.token);
         token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
-        events::emergency_withdraw(&env, &admin, &depositor, &entry.token, entry.amount);
+        events::emergency_withdraw(&env, &admin, &depositor, &entry.token, deposit_id, entry.amount);
         Ok(())
+    }
+
+    /// Batch emergency withdrawal — processes multiple depositors in one call.
+    /// Best-effort: depositors with no active deposit are skipped (success=false).
+    /// Admin signs once for the entire batch. Max `MAX_BATCH_SIZE` entries.
+    pub fn batch_emergency_withdraw(
+        env: Env,
+        admin: Address,
+        depositors: Vec<(Address, u32)>,
+    ) -> Result<Vec<WithdrawResult>, VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+
+        if depositors.len() > MAX_BATCH_SIZE {
+            return Err(VaultError::BatchTooLarge);
+        }
+
+        let mut results: Vec<WithdrawResult> = Vec::new(&env);
+
+        for item in depositors.iter() {
+            let (depositor, deposit_id) = item;
+            match storage::get_deposit_readonly(&env, &depositor, deposit_id) {
+                None => {
+                    results.push_back(WithdrawResult {
+                        depositor,
+                        deposit_id,
+                        success: false,
+                    });
+                }
+                Some(entry) => {
+                    storage::remove_deposit(&env, &depositor, deposit_id);
+                    if storage::get_deposit_ids(&env, &depositor).is_empty() {
+                        storage::remove_depositor(&env, &depositor);
+                    }
+
+                    let token_client = token::Client::new(&env, &entry.token);
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &depositor,
+                        &entry.amount,
+                    );
+
+                    events::emergency_withdraw(
+                        &env,
+                        &admin,
+                        &depositor,
+                        &entry.token,
+                        deposit_id,
+                        entry.amount,
+                    );
+
+                    results.push_back(WithdrawResult {
+                        depositor,
+                        deposit_id,
+                        success: true,
+                    });
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     // ----------------------------------------------------------------
@@ -452,8 +514,6 @@ impl TimeLockVault {
             return Err(VaultError::Unauthorized);
         }
 
-        // Emit an event when a pending admin is cancelled so off-chain indexers
-        // and UIs observing admin state transitions won't show a stale pending admin.
         if let Some(pending) = storage::get_pending_admin(&env) {
             storage::remove_pending_admin(&env);
             events::admin_transfer_cancelled(&env, &admin, &pending);
@@ -479,13 +539,13 @@ impl TimeLockVault {
     //  Read-only Queries
     // ----------------------------------------------------------------
 
-    /// No auth required — this is a public read-only query (closes #81)
+    /// No auth required — public read-only query.
     pub fn get_vault(env: Env, depositor: Address, deposit_id: u32) -> Option<VaultEntry> {
         storage::get_deposit_readonly(&env, &depositor, deposit_id)
     }
 
     pub fn get_vault_batch(env: Env, depositors: Vec<Address>, deposit_id: u32) -> Vec<Option<VaultEntry>> {
-        let limit = if depositors.len() > MAX_BATCH_SIZE { MAX_BATCH_SIZE } else { depositors.len() as u32 };
+        let limit = if depositors.len() > MAX_BATCH_SIZE { MAX_BATCH_SIZE } else { depositors.len() };
         let mut results = Vec::new(&env);
         for i in 0..limit {
             if let Some(depositor) = depositors.get(i) {
@@ -500,13 +560,12 @@ impl TimeLockVault {
         storage::get_deposit_ids(&env, &depositor)
     }
 
-    /// Returns the current ledger timestamp.
-    /// Read-only — does not bump storage TTL.
+    /// Returns the current ledger timestamp. Read-only — does not bump TTL.
     pub fn get_time(env: Env) -> u64 {
         env.ledger().timestamp()
     }
 
-    /// No auth required — this is a public read-only query (closes #81)
+    /// No auth required — public read-only query.
     pub fn time_remaining(env: Env, depositor: Address, deposit_id: u32) -> u64 {
         match storage::get_deposit_readonly(&env, &depositor, deposit_id) {
             None => 0,

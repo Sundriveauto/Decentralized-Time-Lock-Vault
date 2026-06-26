@@ -24,17 +24,52 @@ pub fn next_deposit_id(env: &Env, depositor: &Address) -> u32 {
     id
 }
 
+/// Returns the list of active deposit IDs for a depositor by reading the
+/// stored active-ID list directly — O(k) where k = active deposits, with no
+/// scan over the entire historical counter range.
 pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
-    let counter_key = VaultKey::DepositCounter(depositor.clone());
-    let count: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0);
-    let mut ids = Vec::new(env);
-    for id in 0..count {
-        let key = VaultKey::Deposit(depositor.clone(), id);
-        if env.storage().persistent().has(&key) {
-            ids.push_back(id);
+    let key = VaultKey::ActiveDepositIds(depositor.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn add_active_deposit_id(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::ActiveDepositIds(depositor.clone());
+    let mut ids: Vec<u32> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(deposit_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+fn remove_active_deposit_id(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::ActiveDepositIds(depositor.clone());
+    let ids: Vec<u32> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    let mut new_ids: Vec<u32> = Vec::new(env);
+    for id in ids.iter() {
+        if id != deposit_id {
+            new_ids.push_back(id);
         }
     }
-    ids
+    if new_ids.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    }
 }
 
 pub fn has_any_deposit(env: &Env, depositor: &Address) -> bool {
@@ -59,6 +94,7 @@ pub fn set_deposit(env: &Env, depositor: &Address, deposit_id: u32, entry: &Vaul
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    add_active_deposit_id(env, depositor, deposit_id);
 }
 
 pub fn get_deposit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<VaultEntry> {
@@ -80,6 +116,7 @@ pub fn get_deposit_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> 
 pub fn remove_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::Deposit(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
+    remove_active_deposit_id(env, depositor, deposit_id);
 }
 
 // ----------------------------------------------------------------
@@ -92,6 +129,7 @@ pub fn set_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32, en
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    add_active_deposit_id(env, depositor, deposit_id);
 }
 
 pub fn get_deposit_by_ledger_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> Option<LedgerVaultEntry> {
@@ -102,6 +140,7 @@ pub fn get_deposit_by_ledger_readonly(env: &Env, depositor: &Address, deposit_id
 pub fn remove_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
+    remove_active_deposit_id(env, depositor, deposit_id);
 }
 
 // ----------------------------------------------------------------
@@ -129,6 +168,14 @@ pub fn require_admin(env: &Env, admin: &Address) -> Result<(), crate::errors::Va
 
 pub fn remove_admin(env: &Env) {
     env.storage().persistent().remove(&VaultKey::Admin);
+}
+
+/// Asserts that `caller` is the current admin; returns `Unauthorized` otherwise.
+pub fn require_admin(env: &Env, caller: &Address) -> Result<(), VaultError> {
+    match get_admin(env) {
+        Some(admin) if admin == *caller => Ok(()),
+        _ => Err(VaultError::Unauthorized),
+    }
 }
 
 pub fn set_pending_admin(env: &Env, pending: &Address) {
@@ -279,12 +326,17 @@ fn remove_depositor_slot(env: &Env, addr: &Address) {
 }
 
 pub fn add_depositor(env: &Env, depositor: &Address) {
-    let mut list = get_depositor_list(env);
-    for addr in list.iter() {
-        if &addr == depositor {
-            return;
-        }
+    let member_key = VaultKey::DepositorMember(depositor.clone());
+    // O(1) membership check — avoids full list scan
+    if env.storage().persistent().has(&member_key) {
+        return;
     }
+    env.storage().persistent().set(&member_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&member_key, BUMP_THRESHOLD, BUMP_TARGET);
+
+    let mut list = get_depositor_list(env);
     list.push_back(depositor.clone());
     save_depositor_list(env, &list);
 }
