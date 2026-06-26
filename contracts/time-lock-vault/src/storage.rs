@@ -1,14 +1,22 @@
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::constants::{MAX_BATCH_SIZE, MAX_LOCK_DURATION_SECS};
+use crate::constants::MAX_LOCK_DURATION_SECS;
 use crate::types::{LedgerVaultEntry, VaultEntry, VaultKey};
 
-// Number of seconds per ledger — Soroban ledgers are ~5 seconds apart.
 pub const LEDGER_SECONDS: u64 = 5;
 
-// How many ledgers to extend TTL to cover the maximum allowed lock duration.
 pub const BUMP_THRESHOLD: u32 = 518_400;
 pub const BUMP_TARGET: u32 = ((MAX_LOCK_DURATION_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+
+// ----------------------------------------------------------------
+//  TTL helper
+// ----------------------------------------------------------------
+
+pub fn extend_ttl(env: &Env, key: &VaultKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, BUMP_THRESHOLD, BUMP_TARGET);
+}
 
 // ----------------------------------------------------------------
 //  Deposit counter helpers
@@ -23,9 +31,6 @@ pub fn next_deposit_id(env: &Env, depositor: &Address) -> u32 {
     id
 }
 
-/// Returns the list of active deposit IDs for a depositor by reading the
-/// stored active-ID list directly — O(k) where k = active deposits, with no
-/// scan over the entire historical counter range.
 pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
     let key = VaultKey::ActiveDepositIds(depositor.clone());
     env.storage()
@@ -77,7 +82,6 @@ pub fn has_any_deposit(env: &Env, depositor: &Address) -> bool {
     active > 0
 }
 
-/// Increment the active-deposit counter for `depositor`.
 pub fn inc_active_count(env: &Env, depositor: &Address) {
     let key = VaultKey::ActiveDepositCount(depositor.clone());
     let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
@@ -85,7 +89,6 @@ pub fn inc_active_count(env: &Env, depositor: &Address) {
     env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
-/// Decrement the active-deposit counter for `depositor` (saturating at 0).
 pub fn dec_active_count(env: &Env, depositor: &Address) {
     let key = VaultKey::ActiveDepositCount(depositor.clone());
     let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
@@ -105,6 +108,7 @@ pub fn set_deposit(env: &Env, depositor: &Address, deposit_id: u32, entry: &Vaul
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
     add_active_deposit_id(env, depositor, deposit_id);
+    inc_active_count(env, depositor);
 }
 
 pub fn get_deposit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<VaultEntry> {
@@ -125,6 +129,7 @@ pub fn remove_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::Deposit(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
     remove_active_deposit_id(env, depositor, deposit_id);
+    dec_active_count(env, depositor);
 }
 
 // ----------------------------------------------------------------
@@ -138,6 +143,7 @@ pub fn set_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32, en
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
     add_active_deposit_id(env, depositor, deposit_id);
+    inc_active_count(env, depositor);
 }
 
 pub fn get_deposit_by_ledger_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> Option<LedgerVaultEntry> {
@@ -149,6 +155,7 @@ pub fn remove_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32)
     let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
     remove_active_deposit_id(env, depositor, deposit_id);
+    dec_active_count(env, depositor);
 }
 
 // ----------------------------------------------------------------
@@ -164,24 +171,15 @@ pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().persistent().get(&VaultKey::Admin)
 }
 
-pub fn require_admin(env: &Env, admin: &Address) -> Result<(), crate::errors::VaultError> {
-    let stored = get_admin(env).ok_or(crate::errors::VaultError::Unauthorized)?;
-    if *admin != stored {
-        return Err(crate::errors::VaultError::Unauthorized);
+pub fn require_admin(env: &Env, caller: &Address) -> Result<(), crate::errors::VaultError> {
+    match get_admin(env) {
+        Some(admin) if admin == *caller => Ok(()),
+        _ => Err(crate::errors::VaultError::Unauthorized),
     }
-    Ok(())
 }
 
 pub fn remove_admin(env: &Env) {
     env.storage().persistent().remove(&VaultKey::Admin);
-}
-
-/// Asserts that `caller` is the current admin; returns `Unauthorized` otherwise.
-pub fn require_admin(env: &Env, caller: &Address) -> Result<(), VaultError> {
-    match get_admin(env) {
-        Some(admin) if admin == *caller => Ok(()),
-        _ => Err(VaultError::Unauthorized),
-    }
 }
 
 pub fn set_pending_admin(env: &Env, pending: &Address) {
@@ -235,7 +233,6 @@ pub fn set_max_lock_secs(env: &Env, v: u64) {
         .extend_ttl(&VaultKey::MaxLockSecs, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
-/// Returns the runtime-configured max lock duration, or `None` to use the compile-time default.
 pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
     env.storage().persistent().get(&VaultKey::MaxLockSecs)
 }
@@ -244,7 +241,6 @@ pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
 //  Fee recipient helpers
 // ----------------------------------------------------------------
 
-/// Persists the `fee_recipient` address and bumps TTL. Called once during `initialize`.
 pub fn set_fee_recipient(env: &Env, recipient: &Address) {
     env.storage().persistent().set(&VaultKey::FeeRecipient, recipient);
     extend_ttl(env, &VaultKey::FeeRecipient);
@@ -255,8 +251,22 @@ pub fn get_fee_recipient(env: &Env) -> Option<Address> {
 }
 
 // ----------------------------------------------------------------
-//  Depositor index helpers  (O(1) add / O(1) remove via swap-remove)
+//  Depositor index helpers
 // ----------------------------------------------------------------
+
+fn get_depositor_list_raw(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::DepositorList)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn save_depositor_list_raw(env: &Env, list: &Vec<Address>) {
+    env.storage().persistent().set(&VaultKey::DepositorList, list);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::DepositorList, BUMP_THRESHOLD, BUMP_TARGET);
+}
 
 fn get_depositor_count_raw(env: &Env) -> u32 {
     env.storage()
@@ -319,9 +329,16 @@ fn remove_depositor_slot(env: &Env, addr: &Address) {
         .remove(&VaultKey::DepositorIndex(addr.clone()));
 }
 
+pub fn get_depositor_list(env: &Env) -> Vec<Address> {
+    get_depositor_list_raw(env)
+}
+
+pub fn save_depositor_list(env: &Env, list: &Vec<Address>) {
+    save_depositor_list_raw(env, list);
+}
+
 pub fn add_depositor(env: &Env, depositor: &Address) {
     let member_key = VaultKey::DepositorMember(depositor.clone());
-    // O(1) membership check — avoids full list scan
     if env.storage().persistent().has(&member_key) {
         return;
     }
@@ -330,12 +347,16 @@ pub fn add_depositor(env: &Env, depositor: &Address) {
         .persistent()
         .extend_ttl(&member_key, BUMP_THRESHOLD, BUMP_TARGET);
 
-    let mut list = get_depositor_list(env);
+    let count = get_depositor_count_raw(env);
+    set_depositor_at(env, count, depositor);
+    set_depositor_slot(env, depositor, count);
+    set_depositor_count(env, count + 1);
+
+    let mut list = get_depositor_list_raw(env);
     list.push_back(depositor.clone());
-    save_depositor_list(env, &list);
+    save_depositor_list_raw(env, &list);
 }
 
-/// O(1) swap-remove: moves the last element into the vacated slot.
 pub fn remove_depositor(env: &Env, depositor: &Address) {
     let count = get_depositor_count_raw(env);
     if count == 0 {
@@ -347,7 +368,6 @@ pub fn remove_depositor(env: &Env, depositor: &Address) {
     };
     let last = count - 1;
     if slot != last {
-        // Move last element into the freed slot
         let last_addr = get_depositor_at(env, last);
         set_depositor_at(env, slot, &last_addr);
         set_depositor_slot(env, &last_addr, slot);
@@ -355,6 +375,11 @@ pub fn remove_depositor(env: &Env, depositor: &Address) {
     remove_depositor_at(env, last);
     remove_depositor_slot(env, depositor);
     set_depositor_count(env, last);
+
+    let member_key = VaultKey::DepositorMember(depositor.clone());
+    if env.storage().persistent().has(&member_key) {
+        env.storage().persistent().remove(&member_key);
+    }
 }
 
 pub fn get_depositor_count(env: &Env) -> u32 {
