@@ -13,6 +13,7 @@ pub enum VaultError {
     Unauthorized = 7,
     AmountTooLarge = 8,
     InvalidPenaltyBps = 9,
-    LockDurationTooShort = 10,
-    InvalidAdmin = 11,
+    InvalidAdmin = 10,
+    LockDurationTooShort = 11,
+    ContractPaused = 12,
 }
